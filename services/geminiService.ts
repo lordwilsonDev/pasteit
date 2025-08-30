@@ -11,29 +11,10 @@ if (!API_KEY) {
   throw new Error("API_KEY environment variable is not set");
 }
 
-const ai = new GoogleGenAI({ apiKey: API_KEY });
+export const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 
 // --- Helper Functions ---
-
-/**
- * Creates a fallback prompt to use when the primary one is blocked.
- * @param decade The decade string (e.g., "1950s").
- * @returns The fallback prompt string.
- */
-function getFallbackPrompt(decade: string): string {
-    return `Create a photograph of the person in this image as if they were living in the ${decade}. The photograph should capture the distinct fashion, hairstyles, and overall atmosphere of that time period. Ensure the final image is a clear photograph that looks authentic to the era.`;
-}
-
-/**
- * Extracts the decade (e.g., "1950s") from a prompt string.
- * @param prompt The original prompt.
- * @returns The decade string or null if not found.
- */
-function extractDecade(prompt: string): string | null {
-    const match = prompt.match(/(\d{4}s)/);
-    return match ? match[1] : null;
-}
 
 /**
  * Processes the Gemini API response, extracting the image or throwing an error if none is found.
@@ -89,13 +70,13 @@ async function callGeminiWithRetry(imagePart: object, textPart: object): Promise
 
 
 /**
- * Generates a decade-styled image from a source image and a prompt.
- * It includes a fallback mechanism for prompts that might be blocked in certain regions.
+ * Generates an image variation from a source image and a prompt.
  * @param imageDataUrl A data URL string of the source image (e.g., 'data:image/png;base64,...').
  * @param prompt The prompt to guide the image generation.
+ * @param negativePrompt An optional prompt describing elements to avoid in the image.
  * @returns A promise that resolves to a base64-encoded image data URL of the generated image.
  */
-export async function generateDecadeImage(imageDataUrl: string, prompt: string): Promise<string> {
+export async function generateImageVariation(imageDataUrl: string, prompt: string, negativePrompt?: string): Promise<string> {
   const match = imageDataUrl.match(/^data:(image\/\w+);base64,(.*)$/);
   if (!match) {
     throw new Error("Invalid image data URL format. Expected 'data:image/...;base64,...'");
@@ -105,41 +86,21 @@ export async function generateDecadeImage(imageDataUrl: string, prompt: string):
     const imagePart = {
         inlineData: { mimeType, data: base64Data },
     };
+    
+    let fullPrompt = `Carefully preserving the main subject, replace the background with: ${prompt}`;
+    if (negativePrompt && negativePrompt.trim()) {
+        fullPrompt += `. Do not include the following elements: ${negativePrompt}.`;
+    }
 
-    // --- First attempt with the original prompt ---
+    const textPart = { text: fullPrompt };
+
     try {
-        console.log("Attempting generation with original prompt...");
-        const textPart = { text: prompt };
+        console.log("Attempting generation with prompt:", fullPrompt);
         const response = await callGeminiWithRetry(imagePart, textPart);
         return processGeminiResponse(response);
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-        const isNoImageError = errorMessage.includes("The AI model responded with text instead of an image");
-
-        if (isNoImageError) {
-            console.warn("Original prompt was likely blocked. Trying a fallback prompt.");
-            const decade = extractDecade(prompt);
-            if (!decade) {
-                console.error("Could not extract decade from prompt, cannot use fallback.");
-                throw error; // Re-throw the original "no image" error.
-            }
-
-            // --- Second attempt with the fallback prompt ---
-            try {
-                const fallbackPrompt = getFallbackPrompt(decade);
-                console.log(`Attempting generation with fallback prompt for ${decade}...`);
-                const fallbackTextPart = { text: fallbackPrompt };
-                const fallbackResponse = await callGeminiWithRetry(imagePart, fallbackTextPart);
-                return processGeminiResponse(fallbackResponse);
-            } catch (fallbackError) {
-                console.error("Fallback prompt also failed.", fallbackError);
-                const finalErrorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-                throw new Error(`The AI model failed with both original and fallback prompts. Last error: ${finalErrorMessage}`);
-            }
-        } else {
-            // This is for other errors, like a final internal server error after retries.
-            console.error("An unrecoverable error occurred during image generation.", error);
-            throw new Error(`The AI model failed to generate an image. Details: ${errorMessage}`);
-        }
+        console.error("An unrecoverable error occurred during image generation.", error);
+        throw new Error(`The AI model failed to generate an image. Details: ${errorMessage}`);
     }
 }

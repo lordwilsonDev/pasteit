@@ -6,12 +6,12 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const REMIX_IDEAS = [
-    "to try different hairstyles.",
-    "to turn your pet into a cartoon character.",
-    "to create a fantasy version of yourself.",
-    "to design a superhero based on your photo.",
-    "to place yourself in famous historical events.",
-    "to generate a custom video game avatar.",
+    "to create product mockups.",
+    "to design social media banners.",
+    "to visualize characters in different settings.",
+    "to generate storyboards for a comic.",
+    "to create unique album art.",
+    "to place your avatar in a fantasy world.",
 ];
 
 const Footer = () => {

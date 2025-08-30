@@ -2,353 +2,355 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import React, { useState, ChangeEvent, useRef, useEffect } from 'react';
-import { motion } from 'framer-motion';
-import { generateDecadeImage } from './services/geminiService';
-import PolaroidCard from './components/PolaroidCard';
-import { createAlbumPage } from './lib/albumUtils';
+import React, { useState, ChangeEvent } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import JSZip from 'jszip';
+import { generateImageVariation } from './services/geminiService';
+import ImageCard from './components/PolaroidCard';
 import Footer from './components/Footer';
-
-const DECADES = ['1950s', '1960s', '1970s', '1980s', '1990s', '2000s'];
-
-// Pre-defined positions for a scattered look on desktop
-const POSITIONS = [
-    { top: '5%', left: '10%', rotate: -8 },
-    { top: '15%', left: '60%', rotate: 5 },
-    { top: '45%', left: '5%', rotate: 3 },
-    { top: '2%', left: '35%', rotate: 10 },
-    { top: '40%', left: '70%', rotate: -12 },
-    { top: '50%', left: '38%', rotate: -3 },
-];
-
-const GHOST_POLAROIDS_CONFIG = [
-  { initial: { x: "-150%", y: "-100%", rotate: -30 }, transition: { delay: 0.2 } },
-  { initial: { x: "150%", y: "-80%", rotate: 25 }, transition: { delay: 0.4 } },
-  { initial: { x: "-120%", y: "120%", rotate: 45 }, transition: { delay: 0.6 } },
-  { initial: { x: "180%", y: "90%", rotate: -20 }, transition: { delay: 0.8 } },
-  { initial: { x: "0%", y: "-200%", rotate: 0 }, transition: { delay: 0.5 } },
-  { initial: { x: "100%", y: "150%", rotate: 10 }, transition: { delay: 0.3 } },
-];
+import ChatAssistant from './components/ChatAssistant';
+import ImagePreviewModal from './components/ImagePreviewModal';
+import { RANDOM_PROMPTS, StylePreset } from './lib/prompts';
+import PromptEnhancers from './components/PromptEnhancers';
 
 
-type ImageStatus = 'pending' | 'done' | 'error';
-interface GeneratedImage {
-    status: ImageStatus;
+const NUM_VARIATIONS = 4;
+
+export interface GeneratedImage {
+    status: 'pending' | 'done' | 'error';
     url?: string;
     error?: string;
 }
 
-const primaryButtonClasses = "font-permanent-marker text-xl text-center text-black bg-yellow-400 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:-rotate-2 hover:bg-yellow-300 shadow-[2px_2px_0px_2px_rgba(0,0,0,0.2)]";
+const primaryButtonClasses = "font-permanent-marker text-xl text-center text-black bg-yellow-400 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:-rotate-2 hover:bg-yellow-300 shadow-[2px_2px_0px_2px_rgba(0,0,0,0.2)] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:rotate-0";
 const secondaryButtonClasses = "font-permanent-marker text-xl text-center text-white bg-white/10 backdrop-blur-sm border-2 border-white/80 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:rotate-2 hover:bg-white hover:text-black";
 
-const useMediaQuery = (query: string) => {
-    const [matches, setMatches] = useState(false);
-    useEffect(() => {
-        const media = window.matchMedia(query);
-        if (media.matches !== matches) {
-            setMatches(media.matches);
-        }
-        const listener = () => setMatches(media.matches);
-        window.addEventListener('resize', listener);
-        return () => window.removeEventListener('resize', listener);
-    }, [matches, query]);
-    return matches;
-};
-
 function App() {
-    const [uploadedImage, setUploadedImage] = useState<string | null>(null);
-    const [generatedImages, setGeneratedImages] = useState<Record<string, GeneratedImage>>({});
-    const [isLoading, setIsLoading] = useState<boolean>(false);
-    const [isDownloading, setIsDownloading] = useState<boolean>(false);
+    const [subjectImage, setSubjectImage] = useState<string | null>(null);
+    const [prompt, setPrompt] = useState<string>('');
+    const [negativePrompt, setNegativePrompt] = useState<string>('');
+    const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
+    const [generatedImages, setGeneratedImages] = useState<GeneratedImage[]>([]);
+    const [isGenerating, setIsGenerating] = useState<boolean>(false);
     const [appState, setAppState] = useState<'idle' | 'image-uploaded' | 'generating' | 'results-shown'>('idle');
-    const dragAreaRef = useRef<HTMLDivElement>(null);
-    const isMobile = useMediaQuery('(max-width: 768px)');
-
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null);
 
     const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
             const file = e.target.files[0];
             const reader = new FileReader();
             reader.onloadend = () => {
-                setUploadedImage(reader.result as string);
+                setSubjectImage(reader.result as string);
                 setAppState('image-uploaded');
-                setGeneratedImages({}); // Clear previous results
+                setGeneratedImages([]); // Clear previous results
+                setPrompt(''); // Clear prompt
+                setNegativePrompt(''); // Clear negative prompt
+                setShowAdvanced(false); // Hide advanced options
             };
             reader.readAsDataURL(file);
         }
     };
 
     const handleGenerateClick = async () => {
-        if (!uploadedImage) return;
+        if (!subjectImage || !prompt.trim()) return;
 
-        setIsLoading(true);
+        setIsGenerating(true);
         setAppState('generating');
         
-        const initialImages: Record<string, GeneratedImage> = {};
-        DECADES.forEach(decade => {
-            initialImages[decade] = { status: 'pending' };
-        });
+        const initialImages: GeneratedImage[] = Array(NUM_VARIATIONS).fill({ status: 'pending' });
         setGeneratedImages(initialImages);
 
-        const concurrencyLimit = 2; // Process two decades at a time
-        const decadesQueue = [...DECADES];
+        const generationPromises = initialImages.map((_, index) => 
+            generateImageVariation(subjectImage, prompt, negativePrompt)
+                .then(resultUrl => ({ status: 'done', url: resultUrl } as GeneratedImage))
+                .catch(err => {
+                    const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
+                    console.error(`Failed to generate variation ${index + 1}:`, err);
+                    return { status: 'error', error: errorMessage } as GeneratedImage;
+                })
+        );
+        
+        const results = await Promise.all(generationPromises);
 
-        const processDecade = async (decade: string) => {
-            try {
-                const prompt = `Reimagine the person in this photo in the style of the ${decade}. This includes clothing, hairstyle, photo quality, and the overall aesthetic of that decade. The output must be a photorealistic image showing the person clearly.`;
-                const resultUrl = await generateDecadeImage(uploadedImage, prompt);
-                setGeneratedImages(prev => ({
-                    ...prev,
-                    [decade]: { status: 'done', url: resultUrl },
-                }));
-            } catch (err) {
-                const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
-                setGeneratedImages(prev => ({
-                    ...prev,
-                    [decade]: { status: 'error', error: errorMessage },
-                }));
-                console.error(`Failed to generate image for ${decade}:`, err);
-            }
-        };
-
-        const workers = Array(concurrencyLimit).fill(null).map(async () => {
-            while (decadesQueue.length > 0) {
-                const decade = decadesQueue.shift();
-                if (decade) {
-                    await processDecade(decade);
-                }
-            }
-        });
-
-        await Promise.all(workers);
-
-        setIsLoading(false);
+        setGeneratedImages(results);
+        setIsGenerating(false);
         setAppState('results-shown');
     };
 
-    const handleRegenerateDecade = async (decade: string) => {
-        if (!uploadedImage) return;
-
-        // Prevent re-triggering if a generation is already in progress
-        if (generatedImages[decade]?.status === 'pending') {
-            return;
-        }
+    const handleRegenerateVariation = async (index: number) => {
+        if (!subjectImage || !prompt.trim() || generatedImages[index]?.status === 'pending') return;
         
-        console.log(`Regenerating image for ${decade}...`);
+        console.log(`Regenerating variation for index ${index}...`);
+        
+        // Close modal if it's open for the image being regenerated
+        if(selectedImageIndex === index) {
+            setSelectedImageIndex(null);
+        }
 
-        // Set the specific decade to 'pending' to show the loading spinner
-        setGeneratedImages(prev => ({
-            ...prev,
-            [decade]: { status: 'pending' },
-        }));
+        setGeneratedImages(prev => {
+            const newImages = [...prev];
+            newImages[index] = { status: 'pending' };
+            return newImages;
+        });
 
-        // Call the generation service for the specific decade
         try {
-            const prompt = `Reimagine the person in this photo in the style of the ${decade}. This includes clothing, hairstyle, photo quality, and the overall aesthetic of that decade. The output must be a photorealistic image showing the person clearly.`;
-            const resultUrl = await generateDecadeImage(uploadedImage, prompt);
-            setGeneratedImages(prev => ({
-                ...prev,
-                [decade]: { status: 'done', url: resultUrl },
-            }));
+            const resultUrl = await generateImageVariation(subjectImage, prompt, negativePrompt);
+            setGeneratedImages(prev => {
+                const newImages = [...prev];
+                newImages[index] = { status: 'done', url: resultUrl };
+                return newImages;
+            });
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
-            setGeneratedImages(prev => ({
-                ...prev,
-                [decade]: { status: 'error', error: errorMessage },
-            }));
-            console.error(`Failed to regenerate image for ${decade}:`, err);
+            setGeneratedImages(prev => {
+                const newImages = [...prev];
+                newImages[index] = { status: 'error', error: errorMessage };
+                return newImages;
+            });
+            console.error(`Failed to regenerate variation for index ${index}:`, err);
         }
     };
     
     const handleReset = () => {
-        setUploadedImage(null);
-        setGeneratedImages({});
+        setSubjectImage(null);
+        setGeneratedImages([]);
+        setPrompt('');
         setAppState('idle');
     };
 
-    const handleDownloadIndividualImage = (decade: string) => {
-        const image = generatedImages[decade];
+    const handleDownloadIndividualImage = (index: number) => {
+        const image = generatedImages[index];
         if (image?.status === 'done' && image.url) {
             const link = document.createElement('a');
             link.href = image.url;
-            link.download = `past-forward-${decade}.jpg`;
+            link.download = `background-weaver-variation-${index + 1}.jpg`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
         }
     };
+    
+    const handleDownloadAll = async () => {
+        const zip = new JSZip();
+        const successfulImages = generatedImages.filter(img => img.status === 'done' && img.url);
 
-    const handleDownloadAlbum = async () => {
-        setIsDownloading(true);
-        try {
-            const imageData = Object.entries(generatedImages)
-                .filter(([, image]) => image.status === 'done' && image.url)
-                .reduce((acc, [decade, image]) => {
-                    acc[decade] = image!.url!;
-                    return acc;
-                }, {} as Record<string, string>);
+        if (successfulImages.length === 0) return;
 
-            if (Object.keys(imageData).length < DECADES.length) {
-                alert("Please wait for all images to finish generating before downloading the album.");
-                return;
+        await Promise.all(successfulImages.map(async (image, index) => {
+            if (image.url) {
+                try {
+                    const response = await fetch(image.url);
+                    const blob = await response.blob();
+                    const originalIndex = generatedImages.findIndex(img => img.url === image.url);
+                    zip.file(`variation-${originalIndex + 1}.jpg`, blob);
+                } catch (error) {
+                    console.error(`Failed to fetch image ${index} for zipping:`, error);
+                }
             }
+        }));
 
-            const albumDataUrl = await createAlbumPage(imageData);
-
-            const link = document.createElement('a');
-            link.href = albumDataUrl;
-            link.download = 'past-forward-album.jpg';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-        } catch (error) {
-            console.error("Failed to create or download album:", error);
-            alert("Sorry, there was an error creating your album. Please try again.");
-        } finally {
-            setIsDownloading(false);
+        if (Object.keys(zip.files).length > 0) {
+            zip.generateAsync({ type: "blob" }).then(content => {
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(content);
+                link.download = "background-weaver-pack.zip";
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            });
         }
     };
+
+    const handleSurpriseMe = () => {
+        const randomPrompt = RANDOM_PROMPTS[Math.floor(Math.random() * RANDOM_PROMPTS.length)];
+        setPrompt(randomPrompt);
+    };
+
+    const handleStyleClick = (style: StylePreset) => {
+        setPrompt(prev => prev ? `${prev}, ${style.prompt}` : style.prompt);
+    };
+    
+    const openImageModal = (index: number) => {
+        if(generatedImages[index]?.status === 'done') {
+            setSelectedImageIndex(index);
+        }
+    }
 
     return (
-        <main className="bg-black text-neutral-200 min-h-screen w-full flex flex-col items-center justify-center p-4 pb-24 overflow-hidden relative">
+        <main className="bg-black text-neutral-200 min-h-screen w-full flex flex-col items-center p-4 pb-24 overflow-y-auto">
             <div className="absolute top-0 left-0 w-full h-full bg-grid-white/[0.05]"></div>
             
-            <div className="z-10 flex flex-col items-center justify-center w-full h-full flex-1 min-h-0">
-                <div className="text-center mb-10">
-                    <h1 className="text-6xl md:text-8xl font-caveat font-bold text-neutral-100">Past Forward</h1>
-                    <p className="font-permanent-marker text-neutral-300 mt-2 text-xl tracking-wide">Generate yourself through the decades.</p>
-                </div>
+            <div className="z-10 flex flex-col items-center w-full max-w-5xl mx-auto flex-1">
+                <header className="text-center my-10 md:my-16">
+                    <h1 className="text-6xl md:text-8xl font-caveat font-bold text-neutral-100">AI Background Weaver</h1>
+                    <p className="font-permanent-marker text-neutral-300 mt-2 text-xl tracking-wide">Weave the perfect scene for your creations.</p>
+                </header>
 
-                {appState === 'idle' && (
-                     <div className="relative flex flex-col items-center justify-center w-full">
-                        {/* Ghost polaroids for intro animation */}
-                        {GHOST_POLAROIDS_CONFIG.map((config, index) => (
-                             <motion.div
-                                key={index}
-                                className="absolute w-80 h-[26rem] rounded-md p-4 bg-neutral-100/10 blur-sm"
-                                initial={config.initial}
-                                animate={{
-                                    x: "0%", y: "0%", rotate: (Math.random() - 0.5) * 20,
-                                    scale: 0,
-                                    opacity: 0,
-                                }}
-                                transition={{
-                                    ...config.transition,
-                                    ease: "circOut",
-                                    duration: 2,
-                                }}
-                            />
-                        ))}
+                <AnimatePresence mode="wait">
+                    {appState === 'idle' && (
                         <motion.div
-                             initial={{ opacity: 0, scale: 0.8 }}
-                             animate={{ opacity: 1, scale: 1 }}
-                             transition={{ delay: 2, duration: 0.8, type: 'spring' }}
-                             className="flex flex-col items-center"
+                             key="idle"
+                             initial={{ opacity: 0, y: 20 }}
+                             animate={{ opacity: 1, y: 0 }}
+                             exit={{ opacity: 0, y: -20 }}
+                             transition={{ duration: 0.5 }}
+                             className="flex flex-col items-center w-full max-w-md"
                         >
-                            <label htmlFor="file-upload" className="cursor-pointer group transform hover:scale-105 transition-transform duration-300">
-                                 <PolaroidCard 
-                                     caption="Click to begin"
+                            <label htmlFor="file-upload" className="cursor-pointer group w-full transform hover:scale-105 transition-transform duration-300">
+                                 <ImageCard 
                                      status="done"
+                                     isUploadCard={true}
                                  />
                             </label>
                             <input id="file-upload" type="file" className="hidden" accept="image/png, image/jpeg, image/webp" onChange={handleImageUpload} />
                             <p className="mt-8 font-permanent-marker text-neutral-500 text-center max-w-xs text-lg">
-                                Click the polaroid to upload your photo and start your journey through time.
+                                Upload a character, product, or any subject to begin.
                             </p>
                         </motion.div>
-                    </div>
-                )}
+                    )}
 
-                {appState === 'image-uploaded' && uploadedImage && (
-                    <div className="flex flex-col items-center gap-6">
-                         <PolaroidCard 
-                            imageUrl={uploadedImage} 
-                            caption="Your Photo" 
-                            status="done"
-                         />
-                         <div className="flex items-center gap-4 mt-4">
-                            <button onClick={handleReset} className={secondaryButtonClasses}>
-                                Different Photo
-                            </button>
-                            <button onClick={handleGenerateClick} className={primaryButtonClasses}>
-                                Generate
-                            </button>
-                         </div>
-                    </div>
-                )}
-
-                {(appState === 'generating' || appState === 'results-shown') && (
-                     <>
-                        {isMobile ? (
-                            <div className="w-full max-w-sm flex-1 overflow-y-auto mt-4 space-y-8 p-4">
-                                {DECADES.map((decade) => (
-                                    <div key={decade} className="flex justify-center">
-                                         <PolaroidCard
-                                            caption={decade}
-                                            status={generatedImages[decade]?.status || 'pending'}
-                                            imageUrl={generatedImages[decade]?.url}
-                                            error={generatedImages[decade]?.error}
-                                            onShake={handleRegenerateDecade}
-                                            onDownload={handleDownloadIndividualImage}
-                                            isMobile={isMobile}
-                                        />
-                                    </div>
-                                ))}
+                    {appState === 'image-uploaded' && subjectImage && (
+                        <motion.div
+                            key="image-uploaded"
+                            initial={{ opacity: 0, y: 20 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -20 }}
+                            transition={{ duration: 0.5 }}
+                            className="flex flex-col items-center gap-6 w-full max-w-lg"
+                        >
+                            <div className="w-full max-w-sm">
+                                <img src={subjectImage} alt="Uploaded subject" className="rounded-lg shadow-lg w-full h-auto object-contain" />
                             </div>
-                        ) : (
-                            <div ref={dragAreaRef} className="relative w-full max-w-5xl h-[600px] mt-4">
-                                {DECADES.map((decade, index) => {
-                                    const { top, left, rotate } = POSITIONS[index];
-                                    return (
-                                        <motion.div
-                                            key={decade}
-                                            className="absolute cursor-grab active:cursor-grabbing"
-                                            style={{ top, left }}
-                                            initial={{ opacity: 0, scale: 0.5, y: 100, rotate: 0 }}
-                                            animate={{ 
-                                                opacity: 1, 
-                                                scale: 1, 
-                                                y: 0,
-                                                rotate: `${rotate}deg`,
-                                            }}
-                                            transition={{ type: 'spring', stiffness: 100, damping: 20, delay: index * 0.15 }}
-                                        >
-                                            <PolaroidCard 
-                                                dragConstraintsRef={dragAreaRef}
-                                                caption={decade}
-                                                status={generatedImages[decade]?.status || 'pending'}
-                                                imageUrl={generatedImages[decade]?.url}
-                                                error={generatedImages[decade]?.error}
-                                                onShake={handleRegenerateDecade}
-                                                onDownload={handleDownloadIndividualImage}
-                                                isMobile={isMobile}
-                                            />
-                                        </motion.div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                         <div className="h-20 mt-4 flex items-center justify-center">
-                            {appState === 'results-shown' && (
-                                <div className="flex flex-col sm:flex-row items-center gap-4">
-                                    <button 
-                                        onClick={handleDownloadAlbum} 
-                                        disabled={isDownloading} 
-                                        className={`${primaryButtonClasses} disabled:opacity-50 disabled:cursor-not-allowed`}
+                            <div className="w-full space-y-4">
+                                <div className="relative w-full">
+                                    <textarea
+                                        value={prompt}
+                                        onChange={(e) => setPrompt(e.target.value)}
+                                        placeholder="Describe the background you want to create... e.g., 'a mystical forest at night, glowing mushrooms'"
+                                        className="w-full h-24 p-3 pr-12 bg-neutral-800 border border-neutral-700 rounded-md text-neutral-200 placeholder:text-neutral-500 focus:ring-2 focus:ring-yellow-400 focus:outline-none transition-all duration-200"
+                                        aria-label="Background prompt"
+                                    />
+                                    <button
+                                        onClick={handleSurpriseMe}
+                                        className="absolute top-3 right-3 p-1.5 bg-neutral-700/50 rounded-full text-neutral-300 hover:bg-neutral-700 hover:text-yellow-300 transition-all duration-200 transform hover:scale-110"
+                                        aria-label="Surprise me with a random prompt"
+                                        title="Surprise me!"
                                     >
-                                        {isDownloading ? 'Creating Album...' : 'Download Album'}
-                                    </button>
-                                    <button onClick={handleReset} className={secondaryButtonClasses}>
-                                        Start Over
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                            <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z" />
+                                            <path d="M14.5 9a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1a.5.5 0 01.5-.5zM12 11.5a.5.5 0 00-.5-.5h-1a.5.5 0 000 1h1a.5.5 0 00.5-.5zM9.5 14a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1a.5.5 0 01.5-.5zM11 9.5a.5.5 0 00-.5-.5h-1a.5.5 0 000 1h1a.5.5 0 00.5-.5z" />
+                                        </svg>
                                     </button>
                                 </div>
-                            )}
-                        </div>
-                    </>
-                )}
+                                
+                                <PromptEnhancers onStyleClick={handleStyleClick} />
+
+                                <AnimatePresence>
+                                {showAdvanced && (
+                                    <motion.div
+                                        initial={{ opacity: 0, height: 0 }}
+                                        animate={{ opacity: 1, height: 'auto' }}
+                                        exit={{ opacity: 0, height: 0 }}
+                                        transition={{ duration: 0.3, ease: 'easeInOut' }}
+                                        className="overflow-hidden"
+                                    >
+                                        <textarea
+                                            value={negativePrompt}
+                                            onChange={(e) => setNegativePrompt(e.target.value)}
+                                            placeholder="What to avoid... e.g., 'trees, daytime, text'"
+                                            className="w-full h-20 p-3 bg-neutral-800 border border-neutral-700 rounded-md text-neutral-200 placeholder:text-neutral-500 focus:ring-2 focus:ring-purple-400 focus:outline-none transition-all duration-200"
+                                            aria-label="Negative prompt"
+                                        />
+                                    </motion.div>
+                                )}
+                                </AnimatePresence>
+                                <button onClick={() => setShowAdvanced(!showAdvanced)} className="text-sm text-neutral-400 hover:text-yellow-400 transition-colors">
+                                    {showAdvanced ? '[-] Hide' : '[+]'} Advanced Options
+                                </button>
+                            </div>
+
+                            <div className="flex items-center gap-4 mt-2">
+                                <button onClick={handleReset} className={secondaryButtonClasses}>
+                                    Different Photo
+                                </button>
+                                <button onClick={handleGenerateClick} disabled={!prompt.trim() || isGenerating} className={primaryButtonClasses}>
+                                    {isGenerating ? 'Weaving...' : 'Generate'}
+                                </button>
+                            </div>
+                        </motion.div>
+                    )}
+
+                    {(appState === 'generating' || appState === 'results-shown') && (
+                        <motion.div
+                            key="results"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            transition={{ duration: 0.5 }}
+                            className="w-full flex flex-col items-center"
+                        >
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
+                                {generatedImages.map((image, index) => (
+                                    <ImageCard
+                                        key={index}
+                                        status={image.status}
+                                        imageUrl={image.url}
+                                        error={image.error}
+                                        onClick={() => openImageModal(index)}
+                                        onRegenerate={() => handleRegenerateVariation(index)}
+                                        onDownload={() => handleDownloadIndividualImage(index)}
+                                    />
+                                ))}
+                            </div>
+                            <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
+                                {appState === 'results-shown' && (
+                                    <>
+                                        <button onClick={handleReset} className={secondaryButtonClasses}>
+                                            New Project
+                                        </button>
+                                         <button 
+                                            onClick={handleDownloadAll} 
+                                            className={primaryButtonClasses}
+                                            disabled={generatedImages.every(img => img.status !== 'done')}
+                                        >
+                                            Download All
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
+
+            <div className="fixed bottom-24 right-4 z-40 md:bottom-6 md:right-6">
+                 <button
+                    onClick={() => setIsChatOpen(true)}
+                    className="bg-yellow-400 text-black rounded-full p-4 shadow-lg hover:bg-yellow-300 transition-all duration-300 transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-opacity-50"
+                    aria-label="Open Creative Assistant"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.293 2.293a1 1 0 010 1.414L10 12l-2.293 2.293a1 1 0 01-1.414 0L4 12m16 8l-2.293-2.293a1 1 0 00-1.414 0L14 16l2.293-2.293a1 1 0 000-1.414L14 10" />
+                    </svg>
+                </button>
+            </div>
+
             <Footer />
+
+            <AnimatePresence>
+                {isChatOpen && <ChatAssistant onClose={() => setIsChatOpen(false)} />}
+            </AnimatePresence>
+            
+            <AnimatePresence>
+            {selectedImageIndex !== null && generatedImages[selectedImageIndex] && (
+                <ImagePreviewModal
+                    image={generatedImages[selectedImageIndex]}
+                    onClose={() => setSelectedImageIndex(null)}
+                    onRegenerate={() => handleRegenerateVariation(selectedImageIndex)}
+                    onDownload={() => handleDownloadIndividualImage(selectedImageIndex)}
+                />
+            )}
+            </AnimatePresence>
         </main>
     );
 }
