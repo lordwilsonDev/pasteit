@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import React, { useState, ChangeEvent } from 'react';
+import React, { useState, ChangeEvent, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import JSZip from 'jszip';
 import { generateImageVariation } from './services/geminiService';
@@ -23,7 +23,7 @@ export interface GeneratedImage {
 }
 
 const primaryButtonClasses = "font-permanent-marker text-xl text-center text-black bg-yellow-400 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:-rotate-2 hover:bg-yellow-300 shadow-[2px_2px_0px_2px_rgba(0,0,0,0.2)] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:rotate-0";
-const secondaryButtonClasses = "font-permanent-marker text-xl text-center text-white bg-white/10 backdrop-blur-sm border-2 border-white/80 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:rotate-2 hover:bg-white hover:text-black";
+const secondaryButtonClasses = "font-permanent-marker text-xl text-center text-white bg-white/10 backdrop-blur-sm border-2 border-white/80 py-3 px-8 rounded-sm transform transition-transform duration-200 hover:scale-105 hover:rotate-2 hover:bg-white hover:text-black disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:rotate-0";
 
 function App() {
     const [subjectImage, setSubjectImage] = useState<string | null>(null);
@@ -35,6 +35,13 @@ function App() {
     const [appState, setAppState] = useState<'idle' | 'image-uploaded' | 'generating' | 'results-shown'>('idle');
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null);
+    const [savedProjectExists, setSavedProjectExists] = useState<boolean>(false);
+    const [saveButtonText, setSaveButtonText] = useState<string>('Save Project');
+
+    useEffect(() => {
+        const savedProject = localStorage.getItem('aiBackgroundWeaverProject');
+        setSavedProjectExists(!!savedProject);
+    }, []);
 
     const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
@@ -177,6 +184,44 @@ function App() {
         }
     }
 
+    const handleSaveProject = () => {
+        if (!subjectImage) return;
+        const project = { subjectImage, prompt, negativePrompt };
+        try {
+            localStorage.setItem('aiBackgroundWeaverProject', JSON.stringify(project));
+            setSavedProjectExists(true);
+            setSaveButtonText('Project Saved!');
+            setTimeout(() => setSaveButtonText('Save Project'), 2000);
+        } catch (error) {
+            console.error("Failed to save project:", error);
+            alert("Could not save project. Browser storage may be full.");
+            setSaveButtonText('Save Failed');
+            setTimeout(() => setSaveButtonText('Save Project'), 2000);
+        }
+    };
+
+    const handleLoadProject = () => {
+        const savedProjectJSON = localStorage.getItem('aiBackgroundWeaverProject');
+        if (savedProjectJSON) {
+            try {
+                const savedProject = JSON.parse(savedProjectJSON);
+                setSubjectImage(savedProject.subjectImage);
+                setPrompt(savedProject.prompt);
+                setNegativePrompt(savedProject.negativePrompt);
+                setGeneratedImages([]);
+                if (savedProject.negativePrompt) {
+                    setShowAdvanced(true);
+                } else {
+                    setShowAdvanced(false);
+                }
+                setAppState('image-uploaded');
+            } catch (error) {
+                 console.error("Failed to load project:", error);
+                alert("Could not load project. Saved data may be corrupted.");
+            }
+        }
+    };
+
     return (
         <main className="bg-black text-neutral-200 min-h-screen w-full flex flex-col items-center p-4 pb-24 overflow-y-auto">
             <div className="absolute top-0 left-0 w-full h-full bg-grid-white/[0.05]"></div>
@@ -207,6 +252,14 @@ function App() {
                             <p className="mt-8 font-permanent-marker text-neutral-500 text-center max-w-xs text-lg">
                                 Upload a character, product, or any subject to begin.
                             </p>
+                            {savedProjectExists && (
+                                <button
+                                    onClick={handleLoadProject}
+                                    className="mt-6 font-permanent-marker text-lg text-neutral-400 hover:text-yellow-400 transition-colors underline"
+                                >
+                                    Load Saved Project
+                                </button>
+                            )}
                         </motion.div>
                     )}
 
@@ -270,9 +323,12 @@ function App() {
                                 </button>
                             </div>
 
-                            <div className="flex items-center gap-4 mt-2">
+                            <div className="flex items-center flex-wrap justify-center gap-4 mt-2">
                                 <button onClick={handleReset} className={secondaryButtonClasses}>
                                     Different Photo
+                                </button>
+                                <button onClick={handleSaveProject} className={secondaryButtonClasses} disabled={saveButtonText !== 'Save Project'}>
+                                    {saveButtonText}
                                 </button>
                                 <button onClick={handleGenerateClick} disabled={!prompt.trim() || isGenerating} className={primaryButtonClasses}>
                                     {isGenerating ? 'Weaving...' : 'Generate'}
@@ -307,6 +363,9 @@ function App() {
                                     <>
                                         <button onClick={handleReset} className={secondaryButtonClasses}>
                                             New Project
+                                        </button>
+                                        <button onClick={handleSaveProject} className={secondaryButtonClasses} disabled={saveButtonText !== 'Save Project'}>
+                                            {saveButtonText}
                                         </button>
                                          <button 
                                             onClick={handleDownloadAll} 
